@@ -1,0 +1,34 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/vagas",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/vagas/:match*",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/totem",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/totem/:match*",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/trabalhe-conosco/:match*",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/totem/trabalhe-conosco/:match*",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/",
+      "destination": "/index.html"
+    }
+  ]
+}
