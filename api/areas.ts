@@ -2,9 +2,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import {
   fetchRawAdm,
+  getConfigFromHeaders,
   handleServerError,
   isAuthorizedRelay,
   isGetRequest,
+  sendBadRequest,
   sendJson,
   sendMethodNotAllowed,
   sendUnauthorized,
@@ -25,8 +27,15 @@ export default async function handler(request: IncomingMessage, response: Server
     return
   }
 
+  const config = getConfigFromHeaders(request)
+
+  if (!config) {
+    sendBadRequest(response, 'Credenciais da Intranet Mall nao foram enviadas.')
+    return
+  }
+
   try {
-    const areas = await fetchRawAdm()
+    const areas = await fetchRawAdm(config)
     sendJson(response, 200, areas)
   } catch (error) {
     handleServerError(response, error)

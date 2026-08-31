@@ -1,36 +1,43 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 
-import { fetchJobsWithWpFloors } from './store-floor-from-wp.js'
-import { fetchAllWpLojas } from './wordpress-lojas.js'
-
-type JsonRecord = Record<string, unknown>
-
 const defaultBaseUrl = 'https://www.intranetmall.com/ApiVagasCurriculum/api'
 
-const getServerConfig = () => {
-  const baseUrl = process.env.INTRANETMALL_API_BASE_URL || defaultBaseUrl
-  const login = process.env.INTRANETMALL_LOGIN
-  const password = process.env.INTRANETMALL_PASSWORD
-  const group = process.env.INTRANETMALL_GROUP
-  const shopping = process.env.INTRANETMALL_SHOPPING_CODE || process.env.INTRANETMALL_DB_ENTITY
+export type ShoppingConfig = {
+  login: string
+  password: string
+  group: string
+  shopping: string
+}
+
+const getBaseUrl = () => process.env.INTRANETMALL_API_BASE_URL || defaultBaseUrl
+
+const headerValue = (request: IncomingMessage, name: string) => {
+  const value = request.headers[name]
+  return typeof value === 'string' && value.trim() ? value : null
+}
+
+/**
+ * Le as credenciais que o proprio WordPress ja manda em toda chamada
+ * (intranetmall_relay_headers, em integracao/intranetmall-api.php). Cada site
+ * WordPress manda as credenciais do seu proprio shopping, entao um unico
+ * deploy deste relay atende todos eles.
+ */
+export const getConfigFromHeaders = (request: IncomingMessage): ShoppingConfig | null => {
+  const login = headerValue(request, 'x-login')
+  const password = headerValue(request, 'x-senha')
+  const group = headerValue(request, 'x-grupo')
+  const shopping = headerValue(request, 'x-shopping')
 
   if (!login || !password || !group || !shopping) {
-    throw new Error('Variaveis de ambiente do IntranetMall nao foram configuradas corretamente.')
+    return null
   }
 
-  return {
-    baseUrl,
-    login,
-    password,
-    group,
-    shopping,
-  }
+  return { login, password, group, shopping }
 }
 
 const requestJson = async <T>(endpoint: string, headers: Record<string, string>) => {
-  const { baseUrl } = getServerConfig()
-  const response = await fetch(`${baseUrl}${endpoint}`, {
+  const response = await fetch(`${getBaseUrl()}${endpoint}`, {
     method: 'GET',
     headers,
   })
@@ -43,8 +50,7 @@ const requestJson = async <T>(endpoint: string, headers: Record<string, string>)
 }
 
 const requestPostJson = async <T>(endpoint: string, headers: Record<string, string>, body: unknown) => {
-  const { baseUrl } = getServerConfig()
-  const response = await fetch(`${baseUrl}${endpoint}`, {
+  const response = await fetch(`${getBaseUrl()}${endpoint}`, {
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -71,24 +77,34 @@ const getTokenCacheTtlMs = () => {
   return 12 * 60 * 1000
 }
 
-let tokenCache: { token: string; expiresAt: number } | null = null
+/**
+ * Um relay so atende varios shoppings ao mesmo tempo, entao o cache de token
+ * precisa ser por shopping (login+grupo), nao um valor global unico.
+ */
+const tokenCacheByShopping = new Map<string, { token: string; expiresAt: number }>()
 
-const clearTokenCache = () => {
-  tokenCache = null
+const tokenCacheKey = (config: ShoppingConfig) => `${config.login}::${config.group}`
+
+const clearTokenCache = (config: ShoppingConfig) => {
+  tokenCacheByShopping.delete(tokenCacheKey(config))
 }
 
-const getToken = async () => {
+const getToken = async (config: ShoppingConfig) => {
   const ttlMs = getTokenCacheTtlMs()
+  const cacheKey = tokenCacheKey(config)
   const now = Date.now()
-  if (ttlMs > 0 && tokenCache && tokenCache.expiresAt > now) {
-    return tokenCache.token
+
+  if (ttlMs > 0) {
+    const cached = tokenCacheByShopping.get(cacheKey)
+    if (cached && cached.expiresAt > now) {
+      return cached.token
+    }
   }
 
-  const { login, password, group } = getServerConfig()
   const payload = await requestJson<{ Token?: string }>('/Login', {
-    Login: login,
-    Senha: password,
-    Grupo: group,
+    Login: config.login,
+    Senha: config.password,
+    Grupo: config.group,
   })
 
   if (!payload.Token) {
@@ -96,108 +112,50 @@ const getToken = async () => {
   }
 
   if (ttlMs > 0) {
-    tokenCache = { token: payload.Token, expiresAt: now + ttlMs }
+    tokenCacheByShopping.set(cacheKey, { token: payload.Token, expiresAt: now + ttlMs })
   }
 
   return payload.Token
 }
 
-const buildAuthenticatedHeaders = async () => {
-  const { shopping, group } = getServerConfig()
-  const token = await getToken()
+const buildAuthenticatedHeaders = async (config: ShoppingConfig) => {
+  const token = await getToken(config)
 
   return {
     Token: token,
-    Shopping: shopping,
-    Grupo: group,
+    Shopping: config.shopping,
+    Grupo: config.group,
   }
 }
 
-const fetchBuscaVagasOnce = async () => {
-  return requestJson<unknown[]>('/BuscaVagas', await buildAuthenticatedHeaders())
-}
-
-export const fetchJobsPayload = async () => {
+const withTokenRetry = async <T>(config: ShoppingConfig, run: (headers: Record<string, string>) => Promise<T>) => {
   try {
-    const payload = await fetchBuscaVagasOnce()
-    return Array.isArray(payload) ? payload : []
+    return await run(await buildAuthenticatedHeaders(config))
   } catch (error) {
     const message = error instanceof Error ? error.message : ''
     if (message.includes('401')) {
-      clearTokenCache()
-      const payload = await fetchBuscaVagasOnce()
-      return Array.isArray(payload) ? payload : []
+      clearTokenCache(config)
+      return await run(await buildAuthenticatedHeaders(config))
     }
     throw error
   }
 }
 
-export const fetchJobsPayloadWithWpFloors = async () => {
-  return fetchJobsWithWpFloors(fetchJobsPayload, fetchAllWpLojas)
+/** Array cru de BuscaVagas, no formato que intranetmall_vagas() do tema WordPress espera. */
+export const fetchJobsPayload = async (config: ShoppingConfig) => {
+  const payload = await withTokenRetry(config, (headers) => requestJson<unknown[]>('/BuscaVagas', headers))
+  return Array.isArray(payload) ? payload : []
 }
 
-export const fetchAreasPayload = async () => {
-  const payload = await requestJson<unknown[]>('/Adm', await buildAuthenticatedHeaders())
-
-  if (!Array.isArray(payload)) {
-    return []
-  }
-
-  return payload
-    .flatMap((item) => {
-      if (typeof item === 'string') {
-        return [item]
-      }
-
-      if (item && typeof item === 'object') {
-        return Object.values(item as JsonRecord)
-          .filter((value): value is string => typeof value === 'string')
-          .slice(0, 1)
-      }
-
-      return []
-    })
-    .filter(Boolean)
+/** Array cru de Adm (com IdArea e Nome), no formato que intranetmall_areas() espera. */
+export const fetchRawAdm = async (config: ShoppingConfig) => {
+  const payload = await withTokenRetry(config, (headers) => requestJson<unknown[]>('/Adm', headers))
+  return Array.isArray(payload) ? payload : []
 }
 
-const fetchAdmOnce = async () => {
-  return requestJson<unknown[]>('/Adm', await buildAuthenticatedHeaders())
-}
-
-/**
- * Retorno cru de /Adm (com IdArea e Nome), sem o achatamento que fetchAreasPayload faz
- * para a LP. E o formato que intranetmall_areas() do tema WordPress espera.
- */
-export const fetchRawAdm = async () => {
-  try {
-    const payload = await fetchAdmOnce()
-    return Array.isArray(payload) ? payload : []
-  } catch (error) {
-    const message = error instanceof Error ? error.message : ''
-    if (message.includes('401')) {
-      clearTokenCache()
-      const payload = await fetchAdmOnce()
-      return Array.isArray(payload) ? payload : []
-    }
-    throw error
-  }
-}
-
-const postCurriculumOnce = async (body: unknown) => {
-  return requestPostJson<unknown>('/Curriculum', await buildAuthenticatedHeaders(), body)
-}
-
-export const postCurriculo = async (body: unknown) => {
-  try {
-    return await postCurriculumOnce(body)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : ''
-    if (message.includes('401')) {
-      clearTokenCache()
-      return await postCurriculumOnce(body)
-    }
-    throw error
-  }
+/** Repassa o envio de curriculo para /Curriculum, autenticado com o token do shopping. */
+export const postCurriculo = async (config: ShoppingConfig, body: unknown) => {
+  return withTokenRetry(config, (headers) => requestPostJson<unknown>('/Curriculum', headers, body))
 }
 
 /**
@@ -206,9 +164,9 @@ export const postCurriculo = async (body: unknown) => {
  */
 export const isAuthorizedRelay = (request: IncomingMessage) => {
   const expected = process.env.RELAY_KEY
-  const provided = request.headers['x-relay-key']
+  const provided = headerValue(request, 'x-relay-key')
 
-  if (!expected || typeof provided !== 'string') {
+  if (!expected || !provided) {
     return false
   }
 
@@ -222,30 +180,27 @@ export const isAuthorizedRelay = (request: IncomingMessage) => {
   return timingSafeEqual(expectedBuffer, providedBuffer)
 }
 
-export const sendUnauthorized = (response: ServerResponse) => {
-  sendJson(response, 401, {
-    message: 'Nao autorizado.',
-  })
-}
-
 export const sendJson = (response: ServerResponse, statusCode: number, payload: unknown) => {
   response.statusCode = statusCode
   response.setHeader('Content-Type', 'application/json; charset=utf-8')
   response.end(JSON.stringify(payload))
 }
 
+export const sendUnauthorized = (response: ServerResponse) => {
+  sendJson(response, 401, { message: 'Nao autorizado.' })
+}
+
+export const sendBadRequest = (response: ServerResponse, message: string) => {
+  sendJson(response, 400, { message })
+}
+
 export const sendMethodNotAllowed = (response: ServerResponse) => {
-  sendJson(response, 405, {
-    message: 'Metodo nao permitido.',
-  })
+  sendJson(response, 405, { message: 'Metodo nao permitido.' })
 }
 
 export const handleServerError = (response: ServerResponse, error: unknown) => {
   const message = error instanceof Error ? error.message : 'Erro interno.'
-
-  sendJson(response, 500, {
-    message,
-  })
+  sendJson(response, 500, { message })
 }
 
 export const isGetRequest = (request: IncomingMessage) => request.method === 'GET'
@@ -263,4 +218,3 @@ export const readJsonBody = async (request: IncomingMessage): Promise<unknown> =
 
   return raw ? JSON.parse(raw) : null
 }
-

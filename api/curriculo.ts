@@ -1,11 +1,13 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import {
+  getConfigFromHeaders,
   handleServerError,
   isAuthorizedRelay,
   isPostRequest,
   postCurriculo,
   readJsonBody,
+  sendBadRequest,
   sendJson,
   sendMethodNotAllowed,
   sendUnauthorized,
@@ -26,9 +28,16 @@ export default async function handler(request: IncomingMessage, response: Server
     return
   }
 
+  const config = getConfigFromHeaders(request)
+
+  if (!config) {
+    sendBadRequest(response, 'Credenciais da Intranet Mall nao foram enviadas.')
+    return
+  }
+
   try {
     const body = await readJsonBody(request)
-    const resultado = await postCurriculo(body)
+    const resultado = await postCurriculo(config, body)
     sendJson(response, 200, resultado)
   } catch (error) {
     handleServerError(response, error)
