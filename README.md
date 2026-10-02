@@ -1,7 +1,7 @@
 # Intranet Mall — Relay
 
 Ponte HTTP para os 12 sites WordPress (tema `tema-sorocaba`) conseguirem falar com a API
-de vagas da Intranet Mall. É só backend — não tem página nenhuma, só as 3 rotas abaixo.
+de vagas da Intranet Mall. É só backend — não tem página nenhuma, só as rotas abaixo.
 
 ## Por que isso existe
 
@@ -32,6 +32,7 @@ veio do WordPress e não de um visitante qualquer.
 | `/api/vagas` | GET | `x-relay-key`, `x-login`, `x-senha`, `x-grupo`, `x-shopping` | Login + `BuscaVagas`, devolve o array cru |
 | `/api/areas` | GET | idem | Login + `Adm`, devolve o array cru (com `IdArea` e `Nome`) |
 | `/api/curriculo` | POST | idem + `Content-Type: application/json` | Login + `Curriculum`, repassa o corpo recebido |
+| `/api/sac` | POST | idem + `Content-Type: application/json` | Login + `Sac`, repassa o contato do Fale Conosco (`Nome`, `Email`, `Telefone`, `Observacoes`) |
 
 Sem `x-relay-key` correta: `401`. Com a chave certa mas sem as credenciais do shopping:
 `400`. O token de login é cacheado em memória por shopping (12 min), então dois sites não

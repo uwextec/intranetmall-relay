@@ -158,6 +158,11 @@ export const postCurriculo = async (config: ShoppingConfig, body: unknown) => {
   return withTokenRetry(config, (headers) => requestPostJson<unknown>('/Curriculum', headers, body))
 }
 
+/** Repassa um contato do Fale Conosco para /Sac, autenticado com o token do shopping. */
+export const postSac = async (config: ShoppingConfig, body: unknown) => {
+  return withTokenRetry(config, (headers) => requestPostJson<unknown>('/Sac', headers, body))
+}
+
 /**
  * Confirma que a chamada veio do WordPress (header x-relay-key), nao de um visitante
  * qualquer. Comparacao em tempo constante para nao vazar a chave por timing.
